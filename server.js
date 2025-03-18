@@ -31,15 +31,6 @@ function assignRoles(players, gameId) {
   const playerCount = nonHostPlayers.length;
   const roles = [];
 
-  if (playerCount >= 2) {
-    roles.push('werewolf');
-    roles.push('villager');
-  }
-  if (playerCount >= 3) {
-    roles.push('werewolf');
-    roles.push('villager');
-    roles.push('seer'); 
-  }
   if (playerCount >= 4) {
     roles.push('seer');
     roles.push('werewolf');
@@ -264,8 +255,8 @@ io.on('connection', (socket) => {
     const players = Object.values(games[data.gameId].players);
     const nonHostPlayers = players.filter(p => !p.isHost && !p.disconnected);
     
-    if (nonHostPlayers.length < 2) {
-      socket.emit('error', { message: 'Se necesitan al menos 2 jugadores activos (excluyendo al anfitrión)', type: 'insufficientPlayers' }); // Añadir tipo
+    if (nonHostPlayers.length < 4) {
+      socket.emit('error', { message: 'Se necesitan al menos 4 jugadores activos (excluyendo al anfitrión)', type: 'insufficientPlayers' }); // Añadir tipo
       return;
     }
     
