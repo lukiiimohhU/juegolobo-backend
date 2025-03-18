@@ -8,7 +8,7 @@ const app = express();
 const server = http.createServer(app);
 const io = socketIo(server, {
   cors: {
-    origin: '*', // Permitir todas las conexiones
+    origin: 'https://lukiiimohhu.github.io', // Permitir todas las conexiones
     methods: ['GET', 'POST'],
   },
 });
