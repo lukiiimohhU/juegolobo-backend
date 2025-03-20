@@ -8,7 +8,7 @@ const app = express();
 const server = http.createServer(app);
 const io = socketIo(server, {
   cors: {
-    origin: 'https://lukiiimohhu.github.io', // Permitir todas las conexiones
+    origin: '*', // Permitir todas las conexiones
     methods: ['GET', 'POST'],
   },
 });
@@ -132,34 +132,49 @@ io.on('connection', (socket) => {
     socket.playerId = player.id;
     socket.gameId = gameId;
   
+    if (player.isHost) {
+      game.host = socket.id;
+      console.log(`Host actualizado: ${socket.id} para gameId ${gameId}`);
+    }
+  
+    // Transferir voto si existe
+    if (game.votes[oldSocketId]) {
+      game.votes[socket.id] = game.votes[oldSocketId];
+      delete game.votes[oldSocketId];
+    }
+  
     delete game.players[oldSocketId];
     game.players[socket.id] = player;
   
+    const stateToSend = {
+      state: game.state,
+      day: game.day,
+      time: game.time,
+      players: Object.values(game.players).map(p => ({
+        id: p.id,
+        name: p.name,
+        alive: p.alive,
+        isHost: p.isHost,
+      })),
+    };
+  
+    const hasVoted = !!game.votes[socket.id]; // Verificar si el jugador ya votó
+    console.log(`Restaurando sesión para ${socket.id}, hasVoted: ${hasVoted}`); // Log para depurar
     socket.emit('sessionRestored', {
       playerId: player.id,
       gameId,
       role: player.isHost ? null : player.role,
       alive: player.alive,
       isHost: player.isHost,
-      state: {
-        state: game.state,
-        day: game.day,
-        time: game.time,
-        players: Object.values(game.players).map(p => ({
-          id: p.id,
-          name: p.name,
-          alive: p.alive,
-          isHost: p.isHost,
-        })),
-      },
+      hasVoted, // Enviar estado correcto
+      state: stateToSend,
     });
   
-    io.to(gameId).emit('playerReconnected', { playerId: player.id, name: player.name, isHost: player.isHost });
-    // Enviar roles completos al host
+    io.to(games[gameId].host).emit('playerReconnected', { playerId: player.id, name: player.name, isHost: player.isHost });
     io.to(gameId).emit('updatePlayers', Object.values(games[gameId].players).map(p => ({
       id: p.id,
       name: p.name,
-      role: p.role, // Incluir el rol aquí
+      role: p.role,
       alive: p.alive,
       isHost: p.isHost,
       disconnected: p.disconnected,
@@ -396,8 +411,7 @@ io.on('connection', (socket) => {
     if (!games[gameId] || games[gameId].time !== 'day' || !games[gameId].players[targetId]) return;
     if (!games[gameId].players[socket.id] || !games[gameId].players[socket.id].alive || games[gameId].players[socket.id].isHost) return;
   
-    // Verificar si el jugador ya ha votado
-    if (games[gameId].votes[socket.id]) {
+    if (games[gameId].votes[socket.id]) { // Usar socket.id consistentemente
       socket.emit('error', { message: 'Ya has votado en esta ronda. No puedes cambiar tu voto.' });
       return;
     }
@@ -439,115 +453,116 @@ io.on('connection', (socket) => {
     }
     const game = games[gameId];
   
-    // Usar el estado previo almacenado (si existe), o inicializarlo si es la primera vez
     const previousPlayersState = game.previousPlayersState || Object.values(game.players)
       .filter(p => !p.isHost && !p.disconnected)
       .map(p => ({ id: p.id, name: p.name, alive: p.alive }));
   
-    if (game.time === 'night') {
-      game.time = 'day';
-  
-      // Obtener estado actual de los jugadores vivos, excluyendo al host
-      const currentAlivePlayers = Object.values(game.players)
-        .filter(p => !p.isHost && p.alive && !p.disconnected)
-        .map(p => p.id);
-  
-      // Detectar quién murió esta noche comparando estado previo con actual
-      const deadPlayers = previousPlayersState
-        .filter(player => player.alive && !currentAlivePlayers.includes(player.id))
-        .map(player => player.name);
-  
-      // Crear mensaje personalizado
-      let message = '';
-      if (deadPlayers.length === 0) {
-        message = 'Nadie ha muerto esta noche.';
+      if (game.time === 'night') {
+        game.time = 'day';
+        const currentAlivePlayers = Object.values(game.players)
+          .filter(p => !p.isHost && p.alive && !p.disconnected)
+          .map(p => p.id);
+        const deadPlayers = previousPlayersState
+          .filter(player => player.alive && !currentAlivePlayers.includes(player.id))
+          .map(player => player.name);
+    
+        let message = deadPlayers.length === 0
+          ? 'Nadie ha muerto esta noche.'
+          : `${deadPlayers.join(', ')} ${deadPlayers.length > 1 ? 'han muerto' : 'ha muerto'} esta noche.`;
+        let type = deadPlayers.length === 0 ? 'success' : 'error';
+    
+        console.log('Emitiendo nightEnd:', { message, type }); // Log para depurar
+        io.to(gameId).emit('nightEnd', { deadPlayers, message, type });
+    
+        game.previousPlayersState = Object.values(game.players)
+          .filter(p => !p.isHost && !p.disconnected)
+          .map(p => ({ id: p.id, name: p.name, alive: p.alive }));
       } else {
-        message = `${deadPlayers.join(', ')} ${deadPlayers.length > 1 ? 'han muerto' : 'ha muerto'} esta noche.`;
-      }
-  
-      // Logs de depuración
-      console.log('Estado previo (almacenado):', previousPlayersState);
-      console.log('Jugadores vivos actuales (IDs):', currentAlivePlayers);
-      console.log('Jugadores muertos esta noche:', deadPlayers);
-  
-      io.to(gameId).emit('nightEnd', { deadPlayers, message });
-  
-      // Actualizar el estado previo para la próxima fase
-      game.previousPlayersState = Object.values(game.players)
-        .filter(p => !p.isHost && !p.disconnected)
-        .map(p => ({ id: p.id, name: p.name, alive: p.alive }));
-    } else {
-      game.time = 'night';
-      game.day++;
-  
-      // Determinar quién fue eliminado por votación
-      let eliminatedPlayerName = null;
-      const voteCounts = {};
-      for (const playerId in game.votes) {
-        const vote = game.votes[playerId];
-        if (vote && game.players[vote] && !game.players[vote].isHost && game.players[vote].alive) {
-          voteCounts[vote] = (voteCounts[vote] || 0) + 1;
+        game.time = 'night';
+        game.day++;
+    
+        let eliminatedPlayerName = null;
+        const voteCounts = {};
+        for (const playerId in game.votes) {
+          const vote = game.votes[playerId];
+          if (vote && game.players[vote] && !game.players[vote].isHost && game.players[vote].alive) {
+            voteCounts[vote] = (voteCounts[vote] || 0) + 1;
+          }
         }
-      }
-  
-      // Crear mensaje personalizado para el día
-      let message = '';
-      if (Object.keys(voteCounts).length === 0) {
-        message = 'Nadie ha sido eliminado esta vez.';
-      } else {
-        const maxVotes = Math.max(...Object.values(voteCounts));
-        const tiedPlayers = Object.keys(voteCounts).filter(id => voteCounts[id] === maxVotes);
-  
-        if (tiedPlayers.length > 1) {
-          // Empate: no eliminar a nadie
-          message = 'Ha habido un empate de votos. Ningún jugador es eliminado.';
-        } else if (tiedPlayers.length === 1) {
-          // Un solo jugador con más votos: eliminarlo
-          const selectedPlayer = tiedPlayers[0];
-          game.players[selectedPlayer].alive = false;
-          eliminatedPlayerName = game.players[selectedPlayer].name;
-          message = `${eliminatedPlayerName} ha sido eliminado por votación.`;
+    
+        let message;
+        let type;
+        if (Object.keys(voteCounts).length === 0) {
+          message = 'Nadie ha sido eliminado esta vez.';
+          type = 'success';
+        } else {
+          const maxVotes = Math.max(...Object.values(voteCounts));
+          const tiedPlayers = Object.keys(voteCounts).filter(id => voteCounts[id] === maxVotes);
+    
+          if (tiedPlayers.length > 1) {
+            message = 'Ha habido un empate de votos. Ningún jugador es eliminado.';
+            type = 'warning';
+          } else if (tiedPlayers.length === 1) {
+            const selectedPlayer = tiedPlayers[0];
+            game.players[selectedPlayer].alive = false;
+            eliminatedPlayerName = game.players[selectedPlayer].name;
+            message = `${eliminatedPlayerName} ha sido eliminado por votación.`;
+            type = 'info';
+          }
         }
+    
+        console.log('Emitiendo dayEnd:', { message, type }); // Log para depurar
+        io.to(gameId).emit('dayEnd', { eliminatedPlayer: eliminatedPlayerName, message, type });
+    
+        game.votes = {};
+        io.to(gameId).emit('resetVotes');
+        game.previousPlayersState = Object.values(game.players)
+          .filter(p => !p.isHost && !p.disconnected)
+          .map(p => ({ id: p.id, name: p.name, alive: p.alive }));
       }
-  
-      // Resetear votos
-      game.votes = {};
-  
-      console.log('Jugador eliminado por votación:', eliminatedPlayerName);
-  
-      // Enviar mensaje al cliente
-      io.to(gameId).emit('dayEnd', { eliminatedPlayer: eliminatedPlayerName, message });
-      io.to(gameId).emit('showMessage', { message, type: eliminatedPlayerName ? 'info' : 'warning' });
-  
-      // Actualizar el estado previo para la próxima fase
-      game.previousPlayersState = Object.values(game.players)
-        .filter(p => !p.isHost && !p.disconnected)
-        .map(p => ({ id: p.id, name: p.name, alive: p.alive }));
-    }
-  
-    io.to(gameId).emit('updateGameState', {
-      state: game.state,
-      day: game.day,
-      time: game.time,
-      players: Object.values(game.players).map(p => ({
-        id: p.id,
-        name: p.name,
-        alive: p.alive,
-        isHost: p.isHost,
-        role: p.isHost ? null : p.role
-      })),
+    
+      io.to(gameId).emit('updateGameState', {
+        state: game.state,
+        day: game.day,
+        time: game.time,
+        players: Object.values(game.players).map(p => ({
+          id: p.id,
+          name: p.name,
+          alive: p.alive,
+          isHost: p.isHost,
+          role: p.isHost ? null : p.role
+        })),
+      });
+      checkGameEnd(gameId);
     });
-    checkGameEnd(gameId);
-  });
 
-  socket.on('disconnect', () => {
-    const playerId = socket.playerId;
-    const gameId = socket.gameId;
-    if (playerId && gameId && games[gameId] && games[gameId].players[playerId]) {
-      games[gameId].players[playerId].disconnected = true;
-      io.to(gameId).emit('playerDisconnected', { playerId, name: games[gameId].players[playerId].name, isHost: games[gameId].players[playerId].isHost });
-    }
-  });
+    socket.on('disconnect', () => {
+      const playerId = socket.playerId;
+      const gameId = socket.gameId;
+      if (playerId && gameId && games[gameId] && games[gameId].players[playerId]) {
+        games[gameId].players[playerId].disconnected = true;
+        // Enviar mensaje SOLO al host
+        io.to(games[gameId].host).emit('playerDisconnected', {
+          playerId,
+          name: games[gameId].players[playerId].name,
+          isHost: games[gameId].players[playerId].isHost
+        });
+        // Opcional: Actualizar estado del juego para todos
+        io.to(gameId).emit('updateGameState', {
+          state: games[gameId].state,
+          day: games[gameId].day,
+          time: games[gameId].time,
+          players: Object.values(games[gameId].players).map(p => ({
+            id: p.id,
+            name: p.name,
+            alive: p.alive,
+            isHost: p.isHost,
+            role: p.isHost ? null : p.role,
+            disconnected: p.disconnected
+          })),
+        });
+      }
+    });
 
   socket.on('playAgain', (gameId) => {
     gameId = gameId.toUpperCase();
@@ -598,12 +613,18 @@ io.on('connection', (socket) => {
       return;
     }
   
+    // Enviar mensaje específico al jugador expulsado antes de desconectarlo
+    const targetSocket = io.sockets.sockets.get(targetId);
+    if (targetSocket) {
+    targetSocket.emit('kickedFromGame', { message: 'Has sido expulsado de la sala' });
+    targetSocket.disconnect(true); // Desconectar después de enviar el mensaje
+    }
+
     // Marcar al jugador como desconectado y eliminarlo del juego
     targetPlayer.disconnected = true;
     delete games[gameId].players[targetId];
   
     // Desconectar el socket del jugador objetivo
-    const targetSocket = io.sockets.sockets.get(targetId);
     if (targetSocket) {
       targetSocket.disconnect(true); // Forzar desconexión
     }
